@@ -1,0 +1,166 @@
+require('dotenv').config();
+const {
+  Client,
+  Collection,
+  GatewayIntentBits,
+  Partials,
+  ActivityType,
+  Events
+} = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+const {
+  handleTicketCreate,
+  handleTicketCloseRequest,
+  handleTicketCloseCancel,
+  handleTicketCloseConfirm,
+  handleTicketClaim,
+  handleTicketTranscript
+} = require('./handlers/ticketHandler');
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.User]
+});
+
+client.commands = new Collection();
+
+// تحميل الأوامر من مجلد commands
+const commandsPath = path.join(__dirname, 'commands');
+if (fs.existsSync(commandsPath)) {
+  const commandFiles = fs.readdirSync(commandsPath).filter((file) => file.endsWith('.js'));
+  for (const file of commandFiles) {
+    const filePath = path.join(commandsPath, file);
+    const command = require(filePath);
+    if ('data' in command && 'execute' in command) {
+      client.commands.set(command.data.name, command);
+    } else {
+      console.warn(`[تحذير] الملف ${filePath} يفتقر إلى data أو execute.`);
+    }
+  }
+}
+
+// تشخيص ومراقبة اتصال ديسكورد
+client.on(Events.Debug, (msg) => {
+  if (msg.includes('Heartbeat') || msg.includes('heartbeat')) return;
+  console.log(`[Discord Debug] ${msg}`);
+});
+client.on(Events.Error, (err) => console.error('❌ Discord Error:', err));
+client.on(Events.Warn, (warn) => console.warn('⚠️ Discord Warn:', warn));
+client.on(Events.ShardError, (err, id) => console.error(`❌ Shard ${id} Error:`, err));
+client.on(Events.ShardDisconnect, (event, id) => console.warn(`⚠️ Shard ${id} Disconnected:`, event));
+client.once(Events.ClientReady, () => {
+  console.log('====================================');
+  console.log(`🤖 البوت يعمل بنجاح باسم: ${client.user.tag}`);
+  console.log(`📊 متصل في ${client.guilds.cache.size} سيرفر(ات).`);
+  console.log('====================================');
+
+  client.user.setPresence({
+    activities: [{ name: '🎫 نظام التذاكر | /ticket-setup', type: ActivityType.Watching }],
+    status: 'online'
+  });
+});
+
+// عند انضمام البوت لسيرفر جديد
+client.on(Events.GuildCreate, (guild) => {
+  console.log(`🎉 انضم البوت إلى سيرفر جديد: ${guild.name} (ID: ${guild.id})`);
+});
+
+// معالجة التفاعلات (Interactions)
+client.on('interactionCreate', async (interaction) => {
+  try {
+    // 1. أوامر السلاش (Slash Commands)
+    if (interaction.isChatInputCommand()) {
+      const command = client.commands.get(interaction.commandName);
+      if (!command) return;
+
+      try {
+        await command.execute(interaction);
+      } catch (error) {
+        console.error(`خطأ في تنفيذ الأمر /${interaction.commandName}:`, error);
+        const replyPayload = {
+          content: '❌ حدث خطأ داخلي أثناء تنفيذ هذا الأمر!',
+          ephemeral: true
+        };
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp(replyPayload).catch(() => {});
+        } else {
+          await interaction.reply(replyPayload).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // 2. القوائم المنسدلة (String Select Menus)
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === 'ticket_select_menu') {
+        const selectedValue = interaction.values[0];
+        const typeId = selectedValue.replace('ticket_type_', '');
+        await handleTicketCreate(interaction, typeId);
+      }
+      return;
+    }
+
+    // 3. أزرار التحكم (Buttons)
+    if (interaction.isButton()) {
+      switch (interaction.customId) {
+        case 'ticket_close_request':
+          await handleTicketCloseRequest(interaction);
+          break;
+        case 'ticket_close_cancel':
+          await handleTicketCloseCancel(interaction);
+          break;
+        case 'ticket_close_confirm':
+          await handleTicketCloseConfirm(interaction);
+          break;
+        case 'ticket_claim':
+          await handleTicketClaim(interaction);
+          break;
+        case 'ticket_transcript':
+          await handleTicketTranscript(interaction);
+          break;
+      }
+    }
+  } catch (err) {
+    console.error('Unhandled interaction error:', err);
+  }
+});
+
+// التعامل مع الأخطاء غير المتوقعة لمنع توقف البوت
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
+// سيرفر فحص اتصال خفيف جداً بدون أي ملفات إضافية (لتشغيل البوت 24/7 مجاناً على الاستضافات السحابية مثل Render)
+if (process.env.PORT) {
+  const http = require('http');
+  http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('🤖 Nazem Ticket Bot is Online 24/7!');
+  }).listen(process.env.PORT, () => {
+    console.log(`🌐 [Cloud Host] منفذ السحابة ${process.env.PORT} يعمل بنجاح للحفاظ على اتصال البوت.`);
+  });
+}
+
+const cleanToken = (process.env.DISCORD_TOKEN || '').trim().replace(/["']/g, '');
+
+if (!cleanToken) {
+  console.warn('⚠️ تنبيه: لم يتم تعيين DISCORD_TOKEN في متغيرات البيئة!');
+  console.warn('👉 يرجى فتح تبويب Environment في Render والتأكد من إضافة DISCORD_TOKEN.');
+} else {
+  console.log(`⏳ جاري تسجيل الدخول إلى ديسكورد بالتوكن (طول التوكن: ${cleanToken.length} حرف)...`);
+  client.login(cleanToken)
+    .then(() => {
+      console.log('✅ تم إرسال طلب تسجيل الدخول بنجاح إلى ديسكورد!');
+    })
+    .catch((err) => {
+      console.error('❌ خطأ في تسجيل دخول البوت:', err.message || err);
+    });
+}
